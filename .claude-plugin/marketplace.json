@@ -1,0 +1,5 @@
+{
+  "name": "claude-mods-session-bar",
+  "owner": { "name": "MaanasEgamamidi" },
+  "plugins": [{ "name": "session-cost", "source": "./" }]
+}
