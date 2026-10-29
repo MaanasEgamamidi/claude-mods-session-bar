@@ -106,6 +106,94 @@ export const describe = (s: Stats, now: number, a: Agents = { running: [], finis
   }
 }
 
+// ---- Layout --------------------------------------------------------------------
+
+// The band lays itself out to the width it is given, like a responsive page: each row keeps its
+// full labels while they fit on one line, switches to short ones when they don't, and wraps whole
+// items onto the next line past that, so no phrase is split and nothing is clipped at the edge.
+
+// Cells a Button takes beyond its label: its padding and border.
+const BUTTON_CHROME = 4
+const STATUS_GAP = 2
+const BUTTON_GAP = 1
+// The status row's padding at each side.
+const EDGE = 1
+
+export const describeCacheShort = (s: Stats, now: number) => {
+  const left = cacheMinutesLeft(s.lastResponseAt, now)
+  if (left === undefined) return undefined
+
+  return left > 0 ? `Cache ${left}m` : 'Cache cold'
+}
+
+export const describeAgentsShort = ({ running, finished }: Agents) => {
+  if (running.length > 0 && finished > 0) return `${running.length} running, ${finished} done`
+  if (running.length > 0) return `${running.length} running`
+  if (finished > 0) return `${finished} done`
+
+  return undefined
+}
+
+const defined = <T,>(list: readonly (T | undefined)[]) => list.filter((item): item is T => item !== undefined)
+
+// The status row on one line: its parts, the gaps between them and its padding.
+export const statusWidth = (parts: readonly (string | undefined)[]) => {
+  const shown = defined(parts)
+
+  return shown.reduce((n, part) => n + part.length, 0) + STATUS_GAP * Math.max(0, shown.length - 1) + 2 * EDGE
+}
+
+export type ButtonLabels = { suggest: string; rebuild: string; handoff: string; codex: string; commit?: string; cost?: string }
+
+// The button row on one line: each button with its chrome, the gaps, and the cost at the end.
+export const buttonsWidth = ({ cost, ...buttons }: ButtonLabels) => {
+  const labels = defined(Object.values(buttons))
+
+  return labels.reduce((n, label) => n + label.length + BUTTON_CHROME, 0) + BUTTON_GAP * (labels.length - 1) + (cost === undefined ? 0 : STATUS_GAP + cost.length) + EDGE
+}
+
+// The first option that fits in `columns` on one line, else the last and shortest; the row wraps past that.
+export const pickFit = <T,>(columns: number, options: readonly [T, ...T[]], width: (option: T) => number) =>
+  options.find(option => width(option) <= columns) ?? options[options.length - 1]!
+
+export const buttonLabels = (
+  isShort: boolean,
+  { busy, codexOn, changed, committing, usd }: { busy: Suggest['busy']; codexOn: boolean; changed: number; committing: boolean; usd: number | undefined },
+): ButtonLabels => ({
+  suggest: busy === 'suggest' ? 'Thinking…' : isShort ? '✦ Suggest' : '✦ Suggest a feature',
+  rebuild: busy === 'rebuild' ? 'Rebuilding…' : isShort ? '✎ Rebuild' : '✎ Rebuild Prompt',
+  handoff: busy === 'handoff' ? 'Summarizing…' : '⧉ Handoff',
+  codex: codexOn ? (isShort ? '◉ Codex' : '◉ Codex on') : '○ Codex',
+  commit: committing ? 'Committing…' : changed === 0 ? undefined : isShort ? `⇪ Commit ${changed}` : `⇪ Commit ${changed} file${changed === 1 ? '' : 's'}`,
+  cost: usd === undefined ? undefined : isShort ? format(usd) : `Session ${format(usd)}`,
+})
+
+// Rows a text takes when word-wrapped at `width` cells.
+export const wrapRows = (text: string, width: number) => {
+  let rows = 1
+  let line = 0
+  for (const word of text.split(' ')) {
+    if (line === 0) line = word.length
+    else if (line + 1 + word.length <= width) line += 1 + word.length
+    else {
+      rows += 1
+      line = word.length
+    }
+    for (; line > width; line -= width) rows += 1
+  }
+
+  return rows
+}
+
+// A hover card over a status part `x` cells into the band: as wide as its longest line or the band,
+// slid left so it stays inside, and raised by the rows its lines wrap to so it sits above the part.
+export const hoverCard = (lines: readonly string[], x: number, columns: number) => {
+  const width = Math.min(Math.max(...lines.map(line => line.length)) + 4, Math.max(12, columns - 2 * EDGE))
+  const rows = lines.reduce((n, line) => n + wrapRows(line, width - 4), 0)
+
+  return { width, top: -(rows + 1), left: Math.min(0, columns - EDGE - x - width) }
+}
+
 // Re-caching the context on restart is a cache write, billed at the one-hour rate: twice the input price.
 const CACHE_WRITE_MULTIPLE = 2
 
@@ -524,8 +612,7 @@ export const register: Register = on => {
     await read($, tick)
     const s = await current($)
     const now = await $.clock.now()
-    const cache = describeCache(s, now)
-    const agentsText = describeAgents(await read($, agents))
+    const a = await read($, agents)
     const w = paceWindow(s.limits)
     const verdict = w === undefined ? undefined : pace(w.limit, now, w.windowMs)
     const paceText = verdict === undefined ? 'Pace: measuring…' : `Pace: ${verdict}`
@@ -534,49 +621,84 @@ export const register: Register = on => {
     const repo = await read($, git)
     const { isOn: codexOn } = await read($, codex)
 
+    // The band's own width; a surface that has not measured gets the full labels, wrapping as needed.
+    const columns = e.props.bodyColumns || e.viewport?.columns || Number.POSITIVE_INFINITY
+    const [cache, , agentsText] = pickFit(
+      columns,
+      [
+        [describeCache(s, now), paceText, describeAgents(a)],
+        [describeCacheShort(s, now), paceText, describeAgentsShort(a)],
+      ],
+      statusWidth,
+    )
+    const label = pickFit(
+      columns,
+      [false, true].map(isShort => buttonLabels(isShort, { busy, codexOn, changed: repo.changed, committing: repo.isBusy, usd: s.usd })) as [ButtonLabels, ButtonLabels],
+      buttonsWidth,
+    )
+
     const rate = inputUsdPerMTok(await $.session.model())
     const rewake =
       rate === undefined ? 'Rewake cost unknown for this model' : s.contextTokens === undefined ? 'Rewake cost after the first response' : `Rewake cost ≈ ${format(rewakeUsd(s.contextTokens, rate))}`
     const detail = s.contextTokens === undefined ? '' : `Re-caches ${Math.round(s.contextTokens / 1000)}k context tokens at the one-hour cache-write rate`
+    const cacheCard = hoverCard(detail === '' ? [rewake] : [rewake, detail], EDGE, columns)
+    // The pace follows the cache on the first line when both fit, else it starts the next one.
+    const paceX = cache === undefined || statusWidth([cache, paceText]) > columns ? EDGE : EDGE + cache.length + STATUS_GAP
+    const paceCard = hoverCard([paceSource], paceX, columns)
 
     const { Box, Button, Text } = $.ui.resolve(e)
 
     return (
       <Box flexDirection="column" gap={1}>
-        <Box alignItems="center" gap={2} paddingX={1}>
+        <Box alignItems="center" flexWrap="wrap" columnGap={STATUS_GAP} rowGap={0} paddingX={EDGE}>
           {cache === undefined ? (
             <Text dimColor> </Text>
           ) : (
-            <Box key="cache">
-              <Text dimColor>{cache}</Text>
-              <Box position="absolute" top={-3} left={0} display="none" hover={{ display: 'flex' }} flexDirection="column" borderStyle="round" paddingX={1}>
+            <Box key="cache" flexShrink={0}>
+              <Text dimColor wrap="truncate-end">{cache}</Text>
+              <Box position="absolute" top={cacheCard.top} left={cacheCard.left} width={cacheCard.width} display="none" hover={{ display: 'flex' }} flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text>{rewake}</Text>
                 {detail === '' ? null : <Text dimColor>{detail}</Text>}
               </Box>
             </Box>
           )}
-          <Box key="pace">
-            <Text dimColor>{paceText}</Text>
-            <Box position="absolute" top={-2} left={0} display="none" hover={{ display: 'flex' }} borderStyle="round" paddingX={1}>
+          <Box key="pace" flexShrink={0}>
+            <Text dimColor wrap="truncate-end">{paceText}</Text>
+            <Box position="absolute" top={paceCard.top} left={paceCard.left} width={paceCard.width} display="none" hover={{ display: 'flex' }} borderStyle="round" paddingX={1}>
               <Text>{paceSource}</Text>
             </Box>
           </Box>
-          {agentsText === undefined ? null : <Text dimColor>{agentsText}</Text>}
+          {agentsText === undefined ? null : (
+            <Box flexShrink={0}>
+              <Text dimColor wrap="truncate-end">{agentsText}</Text>
+            </Box>
+          )}
         </Box>
-        <Box alignItems="center" gap={1} paddingRight={1}>
-          <Button key="suggest" label={busy === 'suggest' ? 'Thinking…' : '✦ Suggest a feature'} onPress={() => suggestFeature($)} />
-          <Button key="rebuild" label={busy === 'rebuild' ? 'Rebuilding…' : '✎ Rebuild Prompt'} onPress={() => rebuildDraft($)} />
-          <Button key="handoff" label={busy === 'handoff' ? 'Summarizing…' : '⧉ Handoff'} onPress={press => copyHandoff($, press)} />
-          <Button key="codex" variant={codexOn ? 'primary' : 'secondary'} label={codexOn ? '◉ Codex on' : '○ Codex'} onPress={() => toggleCodex($)} />
-          {repo.changed > 0 || repo.isBusy ? (
-            <Button
-              key="commit"
-              label={repo.isBusy ? 'Committing…' : `⇪ Commit ${repo.changed} file${repo.changed === 1 ? '' : 's'}`}
-              onPress={() => commitChanges($)}
-            />
-          ) : null}
-          {s.usd === undefined ? null : <Box key="spacer" flexGrow={1} />}
-          {s.usd === undefined ? null : <Text key="cost" dimColor>{`Session ${format(s.usd)}`}</Text>}
+        <Box alignItems="center" gap={STATUS_GAP} paddingRight={EDGE}>
+          <Box flexGrow={1} flexShrink={1} flexWrap="wrap" alignItems="center" columnGap={BUTTON_GAP} rowGap={1}>
+            <Box flexShrink={0}>
+              <Button key="suggest" label={label.suggest} onPress={() => suggestFeature($)} />
+            </Box>
+            <Box flexShrink={0}>
+              <Button key="rebuild" label={label.rebuild} onPress={() => rebuildDraft($)} />
+            </Box>
+            <Box flexShrink={0}>
+              <Button key="handoff" label={label.handoff} onPress={press => copyHandoff($, press)} />
+            </Box>
+            <Box flexShrink={0}>
+              <Button key="codex" variant={codexOn ? 'primary' : 'secondary'} label={label.codex} onPress={() => toggleCodex($)} />
+            </Box>
+            {label.commit === undefined ? null : (
+              <Box flexShrink={0}>
+                <Button key="commit" label={label.commit} onPress={() => commitChanges($)} />
+              </Box>
+            )}
+          </Box>
+          {label.cost === undefined ? null : (
+            <Box flexShrink={0}>
+              <Text key="cost" dimColor wrap="truncate-end">{label.cost}</Text>
+            </Box>
+          )}
         </Box>
       </Box>
     )

@@ -1,6 +1,6 @@
 {
   "name": "session-cost",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A bar above the prompt in the Claude desktop app: session cost, prompt-cache countdown, 5-hour pace, and one-click Suggest, Rebuild Prompt, Handoff and Commit buttons, and a toggle that hands prompts to the Codex CLI",
   "types": "./types/index.d.ts"
 }

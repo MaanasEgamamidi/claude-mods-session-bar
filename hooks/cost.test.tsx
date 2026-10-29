@@ -5,7 +5,15 @@ import {
   cleanSuggestion,
   codexInstructions,
   describe,
+  buttonLabels,
+  buttonsWidth,
   describeAgents,
+  describeAgentsShort,
+  describeCacheShort,
+  hoverCard,
+  pickFit,
+  statusWidth,
+  wrapRows,
   describeToolUse,
   handoffTranscript,
   format,
@@ -273,3 +281,55 @@ test('the Codex toggle hands prompts to Codex only while it is on', async ($, on
   expect(seen[1]?.[0]).toContain('CODEX MODE is on')
   expect(seen[2]).toBeUndefined()
 })
+
+test('the band picks the longest labels that fit its width and wraps the rest', () => {
+  const state = { busy: undefined, codexOn: false, changed: 7, committing: false, usd: 22.48 }
+  const full = buttonLabels(false, state)
+  const short = buttonLabels(true, state)
+  expect(full.commit).toBe('⇪ Commit 7 files')
+  expect(short).toEqual({ suggest: '✦ Suggest', rebuild: '✎ Rebuild', handoff: '⧉ Handoff', codex: '○ Codex', commit: '⇪ Commit 7', cost: '$22.48' })
+  expect(pickFit(200, [full, short], buttonsWidth)).toBe(full)
+  expect(pickFit(70, [full, short], buttonsWidth)).toBe(short)
+  // Too narrow even for the short labels: still the short ones, and the row wraps them.
+  expect(pickFit(30, [full, short], buttonsWidth)).toBe(short)
+
+  expect(statusWidth(['Cache warm · 60m left', 'Pace: Too Fast', undefined])).toBe(21 + 2 + 14 + 2)
+  expect(describeCacheShort({ limits: [], lastResponseAt: 0 }, 0)).toBe('Cache 60m')
+  expect(describeAgentsShort({ running: ['a', 'b'], finished: 2 })).toBe('2 running, 2 done')
+})
+
+test('a hover card wraps to the band, sits above its part and stays inside the edges', () => {
+  expect(wrapRows('Re-caches 439k context tokens at the one-hour cache-write rate', 80)).toBe(1)
+  expect(wrapRows('Re-caches 439k context tokens at the one-hour cache-write rate', 30)).toBe(3)
+  const lines = ['Rewake cost ≈ $3.51', 'Re-caches 439k context tokens at the one-hour cache-write rate']
+  // Wide: as wide as its longest line, two rows above the part.
+  expect(hoverCard(lines, 1, 200)).toEqual({ width: 66, top: -3, left: 0 })
+  // Narrow: no wider than the band, taller for the wrapped line, and raised to match.
+  const narrow = hoverCard(lines, 1, 40)
+  expect(narrow.width).toBe(38)
+  expect(narrow.top).toBe(-(1 + wrapRows(lines[1]!, 34) + 1))
+  // A part far to the right slides its card left so it ends at the band's edge.
+  expect(hoverCard(['5-hour window: 23% used, resets in 60m'], 30, 50).left).toBe(-(30 + 42 - 49))
+})
+
+for (const [columns, isShort] of [
+  [44, true],
+  [80, true],
+  [140, false],
+] as const) {
+  test(`the desktop band at ${columns} columns draws ${isShort ? 'short' : 'full'} labels`, async ($, on) => {
+    mock.clock(on)
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({
+      value: { startedAt: 0, context: { window: 200000, tokens: 439000, percent: 34 }, rateLimits: [fiveHour(30)], cost: { usd: 22.48 } },
+    }))
+
+    for (const surface of ['desktop', 'mobile'] as const) {
+      const ui = await $.ui.mount({ plugin: 'session-cost', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: columns } as never })
+      expect(await ui.find({ type: 'Text', text: isShort ? '$22.48' : 'Session $22.48' })).toBeDefined()
+      expect(await ui.find({ type: 'Button', label: isShort ? '✦ Suggest' : '✦ Suggest a feature' } as never)).toBeDefined()
+      expect(await ui.find({ key: 'handoff' })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+}
